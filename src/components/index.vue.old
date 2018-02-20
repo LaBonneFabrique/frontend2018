@@ -1,0 +1,467 @@
+<template>
+  <div>
+        <q-card v-for="(activite, index) in activites" inline style="width: 350px; margin-bottom: 5px;" :key="activite.id" >
+      <q-card-media>
+        <img height="150" width="350" :src="activite.image" />
+      </q-card-media>
+      <q-card-title style="padding: 5px; margin-top: 5px">
+        {{activite.titre}}
+      </q-card-title>
+      <q-card-main>
+        <vue-markdown :source="activite.description"></vue-markdown>
+      </q-card-main>
+      <q-card-separator />
+      <q-card-actions align="end">
+        <div style="margin-top: 8px" v-if="activite.checkInscription">{{nbPlacesRestantes(index)}}</div>
+        <q-btn flat inverted color="amber-8" @click="creationModalInscription(activite)" v-if="activite.checkInscription" 
+        :disable="isComplet(activite)"
+        ><q-icon name="fa-pencil-square-o" />
+        <q-tooltip anchor="bottom middle" self="top middle">
+          Inscription
+        </q-tooltip>
+        </q-btn>
+        <q-btn v-else flat inverted>
+        </q-btn>
+      </q-card-actions>
+    </q-card>
+    
+    <q-modal v-model = "modalInscription" :content-css="{padding: '20px'}">
+      <h6>Inscription</h6>
+      <hr />
+      <div>Sélectionnez le ou les membres de votre famille à inscrire :</div>
+      <q-checkbox
+        v-model="aInscrire"
+        v-for="(membre, index) in userData.profil"
+        :label="membre.prenom"
+        :val="membre.id"
+        :key="membre.id"
+        style="margin-right: 10px"/>
+       <div v-for="membre in userData.profil" v-if="inscrire(membre.id) && !activiteInscription.checkInscriptionCycle" style="margin-top: 10px">
+         <div>Choisissez le créneau pour {{membre.prenom}}</div>
+         <hr />
+         <q-checkbox
+           v-model="checkboxInscription"
+           v-for="creneau in activiteInscription.creneaux"
+           :label = "horaireLisible(creneau.dateDebut, creneau.dateFin)"
+           :val = "getValeur(membre.id, creneau.id)"
+           :key = "creneau.id"
+           :disable = "verifieCheckbox(membre.id, creneau.id)"
+           style="margin-right: 10px"/>
+       </div>
+       <div class="row justify-end" style="margin-top: 15px">
+       <q-btn color="amber-8" @click="modalInscription = false" flat inverted >Annuler</q-btn>
+       <q-btn v-if="!inscriptionUpdate" color="primary" flat inverted @click="saveInscription()"
+         :disable="btnDisableStatus()"
+         >
+         Enregistrer</q-btn>
+       <q-btn v-else color="primary" :disable="btnDisableStatus()" flat inverted @click="saveInscription()">Modifier</q-btn>
+       </div>
+    </q-modal>
+    
+  </div>
+</template>
+
+<script>
+import {
+  QCard,
+  QCardTitle,
+  QCardMedia,
+  QCardActions,
+  QCardSeparator,
+  QCardMain,
+  QBtn,
+  QIcon,
+  Loading,
+  QSpinnerGears,
+  QTooltip,
+  QModal,
+  QCheckbox,
+  date,
+  Toast
+} from 'quasar'
+import { QUERY_ALL_ACTIVITES } from '../constants/activitesGraphQL'
+import { GET_ILLU_BY_ID } from '../constants/illustrationsGraphQL'
+import { FIND_USER_BY_ID } from '../constants/userAuth'
+import { AJOUT_INSCRIPTION, LISTE_INSCRIPTION, EFFACE_LISTE_INSCRIPTION, LISTE_INSCRIPTION_BY_ACTIVITES, LES_INSCRIPTIONS, CONNECT_INSCRIPTION_ACTIVITE } from '../constants/inscriptionGraphQL'
+import { authMixins } from '../utils/auth.js'
+import cloudinary from 'cloudinary-core'
+var cl = new cloudinary.Cloudinary({cloud_name: 'la-bonne-fabrique', secure: true})
+
+import VueMarkdown from 'vue-markdown'
+
+export default {
+  mixins: [authMixins],
+  components: {
+    QCard,
+    QCardTitle,
+    QCardMedia,
+    QCardActions,
+    QCardSeparator,
+    QCardMain,
+    QBtn,
+    QIcon,
+    VueMarkdown,
+    QTooltip,
+    QModal,
+    QCheckbox
+  },
+  data () {
+    return {
+      activites: [],
+      modalInscription: false,
+      aInscrire: [],
+      checkDisable: false,
+      activiteInscription: {},
+      checkboxInscription: [],
+      inscriptionUpdate: false,
+      userData: {},
+      listeInscriptions: [],
+      complet: false,
+      allInscriptions: []
+    }
+  },
+  apollo: {
+    allActivites: {
+      query: QUERY_ALL_ACTIVITES,
+      fetchPolicy: 'network-only',
+      loadingKey: 'loadingActivites',
+      watchLoading (isLoading, countModifier) {
+        this.loadingActivites = isLoading
+        if (isLoading) {
+          Loading.show({
+            spinner: QSpinnerGears,
+            message: 'Chargement des données',
+            messageColor: 'white',
+            spinnerSize: 150, // in pixels
+            spinnerColor: 'white',
+            customClass: 'bg-test'
+          })
+        }
+        else {
+          Loading.hide()
+        }
+      },
+      result (result) {
+        var activites = []
+        this.activites = []
+        var promises = []
+        result.data.allActivites.forEach((activite) => {
+          this.etatPublication = activite.publie
+          var lesCreneaux = []
+          activite.creneaux.forEach((creneau) => {
+            lesCreneaux.push({
+              id: creneau.id,
+              dateDebut: creneau.dateDebut,
+              dateFin: creneau.dateFin,
+              maxParticipants: creneau.maxParticipants
+            })
+          })
+          promises.push(
+            this.$apollo.query({
+              query: GET_ILLU_BY_ID,
+              fetchPolicy: 'network-only',
+              variables: {
+                id: activite.illustration
+              }
+            }).then((data) => {
+              const illustration = data.data.allActivitesIllustrations[0]
+              activites.push({
+                id: activite.id,
+                inscriptions: activite.inscriptions,
+                publie: activite.publie,
+                lieu: activite.lieuActivite,
+                checkInscription: activite.checkInscription,
+                checkInscriptionCycle: activite.checkInscriptionCycle,
+                creneaux: lesCreneaux,
+                prix: activite.prix,
+                titre: activite.titreActivite,
+                description: activite.description,
+                image: cl.url(illustration.idImage + '.' + illustration.format, { width: 350, height: 150, crop: 'fill', gravity: 'auto' }),
+                nbMaxTotalParticipants: activite.nbMaxTotalParticipants
+              })
+            }).catch((error) => {
+              console.log(error)
+            })
+          )
+        })
+        Promise.all(promises).then((data) => {
+          this.activites = Object.assign([], activites)
+        })
+      }
+    },
+    userData: {
+      query: FIND_USER_BY_ID,
+      fetchPolicy: 'network-only',
+      variables () {
+        return {
+          id: this.loggedInUser()
+        }
+      },
+      update (data) {
+        this.listeInscriptions = []
+        data.allUsers[0].profil.forEach((membre) => {
+          this.$apollo.query({
+            query: LISTE_INSCRIPTION,
+            fetchPolicy: 'network-only',
+            variables: {
+              membreId: membre.id
+            }
+          }).then((data) => {
+            if (data.data.allInscriptions.length > 0) {
+              data.data.allInscriptions.forEach((inscription) => {
+                this.listeInscriptions.push(inscription)
+              })
+            }
+          })
+        })
+        return data.allUsers[0]
+      }
+    },
+    allInscriptions: {
+      query: LES_INSCRIPTIONS,
+      fetchPolicy: 'network-only'
+    }
+  },
+  methods: {
+    nbPlacesRestantes: function (nActivite) {
+      const nbPlaces = this.activites[nActivite].nbMaxTotalParticipants - this.activites[nActivite].inscriptions.length
+      if (nbPlaces > 1) return nbPlaces.toString() + ' places restantes '
+      if (nbPlaces === 1) return 'Dernière place'
+      if (nbPlaces === 0) {
+        return 'Séance complète'
+      }
+    },
+    inscrire: function (mId) {
+      if (this.aInscrire.indexOf(mId) > -1) {
+        return true
+      }
+      else {
+        return false
+      }
+    },
+    getValeur: function (mId, cId) {
+      return mId + '**-**' + cId
+    },
+    verifieCheckbox: function (mId, cId) {
+      var membreInscritFlag = false // verification si membre inscrit à un creneau
+      var membreInscritCreneauFlag = false // verification si membre inscrit à CE creneau cId
+      let retour = false
+      this.checkboxInscription.forEach((inscription) => {
+        if (inscription.indexOf(mId) > -1) membreInscritFlag = true
+        // console.log(this.getValeur(mId, cId))
+        if (inscription.indexOf(this.getValeur(mId, cId)) > -1) membreInscritCreneauFlag = true
+        if ((membreInscritFlag && membreInscritCreneauFlag) || (!membreInscritFlag && !membreInscritCreneauFlag)) {
+        // if (membreInscritCreneauFlag) {
+          retour = false
+        }
+        else {
+          retour = true
+        }
+      })
+      return retour
+    },
+    horaireLisible: function (debut, fin) {
+      let dateActivite = date.formatDate(debut, 'dddd D MMMM', {
+        monthNames: ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'],
+        dayNames: ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi']
+      })
+      let heureDebut = date.formatDate(debut, 'HH')
+      let minDebut = date.formatDate(debut, 'mm')
+      let heureFin = date.formatDate(fin, 'HH')
+      let minFin = date.formatDate(fin, 'mm')
+      return dateActivite + ' de ' + heureDebut + 'h' + minDebut + ' à ' + heureFin + 'h' + minFin
+    },
+    saveInscription: function () {
+      this.modalInscription = false
+      if (this.listeInscriptions.length > 0) this.updateInscription()
+      if (this.aInscrire.length === 0) {
+        this.modalInscription = false
+        return
+      }
+      Loading.show({
+        spinner: QSpinnerGears,
+        message: 'Enregistrement de l\'inscription',
+        messageColor: 'white',
+        spinnerSize: 150, // in pixels
+        spinnerColor: 'white',
+        customClass: 'bg-test'
+      })
+      if (this.activiteInscription.checkInscriptionCycle) {
+        // sauvegarder id membre dans chaque creneau,
+        var promises = []
+        const activiteId = this.activiteInscription.id
+        this.activiteInscription.creneaux.forEach((creneau) => {
+          this.aInscrire.forEach((membre) => {
+            promises.push(
+              this.$apollo.mutate({
+                mutation: AJOUT_INSCRIPTION,
+                variables: {
+                  membreId: membre,
+                  creneauId: creneau.id
+                }
+              }).then((data) => {
+                // console.log(data)
+                this.$apollo.mutate({
+                  mutation: CONNECT_INSCRIPTION_ACTIVITE,
+                  variables: {
+                    activiteId: activiteId,
+                    inscriptionId: data.data.createInscription.id
+                  }
+                })
+              })
+            )
+          })
+        })
+        Promise.all(promises).then((data) => {
+          this.$apollo.queries.allActivites.refetch()
+          this.$apollo.queries.userData.refetch()
+          Loading.hide()
+          Toast.create.positive({
+            html: 'Inscription effectuée avec succès.'
+          })
+        })
+      }
+      else {
+        var promises2 = []
+        this.checkboxInscription.forEach((stringInscription) => {
+          const arrayId = stringInscription.split('**-**')
+          const activiteId = this.activiteInscription.id
+          const membreId = arrayId[0]
+          const creneauId = arrayId[1]
+          // update graphCool
+          promises2.push(
+            this.$apollo.mutate({
+              mutation: AJOUT_INSCRIPTION,
+              variables: {
+                membreId,
+                creneauId
+              }
+            }).then((data) => {
+              this.$apollo.mutate({
+                mutation: CONNECT_INSCRIPTION_ACTIVITE,
+                variables: {
+                  activiteId: activiteId,
+                  inscriptionId: data.data.createInscription.id
+                }
+              })
+            })
+          )
+        })
+        Promise.all(promises2).then((data) => {
+          this.$apollo.queries.allActivites.refetch()
+          this.$apollo.queries.userData.refetch()
+          Loading.hide()
+          Toast.create.positive({
+            html: 'Inscription effectuée avec succès.'
+          })
+        })
+      }
+      if (this.aInscrire.length === 0) {
+        this.$apollo.queries.allActivites.refetch()
+        this.$apollo.queries.userData.refetch()
+      }
+    },
+    updateInscription: function () {
+      Loading.show({
+        spinner: QSpinnerGears,
+        message: 'Préparation de l\'inscription',
+        messageColor: 'white',
+        spinnerSize: 150, // in pixels
+        spinnerColor: 'white',
+        customClass: 'bg-test'
+      })
+      var promises = []
+      this.listeInscriptions.forEach((inscription) => {
+        if (inscription.id) {
+          promises.push(
+            this.$apollo.mutate({
+              mutation: EFFACE_LISTE_INSCRIPTION,
+              variables: {
+                id: inscription.id
+              }
+            }).then((data) => {
+            })
+          )
+        }
+      })
+      Promise.all(promises).then((data) => {
+        Loading.hide()
+        this.$apollo.queries.allActivites.refetch()
+        this.$apollo.queries.userData.refetch()
+      })
+    },
+    creationModalInscription: function (activite) {
+      this.activiteInscription = activite
+      this.aInscrire = []
+      this.checkboxInscription = []
+      this.listeInscriptions = []
+      this.userData.profil.forEach((membre) => {
+        let listeAteliers = this.traitementInscription('membre', membre.id)
+        if (listeAteliers.length > 0) this.listeInscriptions.push(listeAteliers[0])
+        if (listeAteliers.length > 0) {
+          this.inscriptionUpdate = true
+          this.aInscrire.push(membre.id)
+          this.checkboxInscription.push(this.getValeur(membre.id, listeAteliers[0].creneauId))
+        }
+      })
+      this.modalInscription = true
+    },
+    traitementInscription: function (leCas, mId, aId) {
+      var listeFiltree = []
+      switch (leCas) {
+        case 'membre':
+          listeFiltree = this.activiteInscription.inscriptions.filter((el) => {
+            return el.membreId === mId
+          })
+          break
+        case 'creneau':
+          listeFiltree = this.activiteInscription.inscriptions.filter((el) => {
+            return el.membreId === mId && el.creneauId === aId
+          })
+          break
+      }
+      return listeFiltree
+    },
+    getNbInscrits: function (cId) {
+      return this.$apollo.query({
+        query: LISTE_INSCRIPTION_BY_ACTIVITES,
+        fetchPolicy: 'network-only',
+        variables: {
+          creneauId: cId
+        }
+      }).then((data) => {
+        return data.data.allInscriptions.length
+      })
+    },
+    btnDisableStatus: function () {
+      if (this.activiteInscription.checkInscriptionCycle) {
+        return false
+      }
+      else {
+        if (this.checkboxInscription.length > 0 || this.listeInscriptions.length > 0) { return false }
+        else { return true }
+      }
+    },
+    isComplet: function (activite) {
+      // console.log('nbtotal', activite.nbTotalInscrits)
+      const complet = (activite.nbMaxTotalParticipants - activite.inscriptions.length) === 0
+      var estDejaInscrit = false
+      this.userData.profil.forEach((membre) => {
+        const filtre = activite.inscriptions.filter((el) => {
+          return el.membreId === membre.id
+        })
+        if (filtre.length > 0) estDejaInscrit = true
+      })
+      if (!this.isLoggedIn()) return true
+      return complet && !estDejaInscrit
+    }
+  }
+}
+</script>
+
+<style lang="stylus">
+@import '~variables'
+
+.bg-test
+  background-color: rgba(75, 188, 196, 0.5)
+</style>
